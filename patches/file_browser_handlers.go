@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -334,6 +336,208 @@ func (h *FileBrowserHandlers) UploadFile(w http.ResponseWriter, r *http.Request)
 		response["message"] = "All file uploads failed"
 		writeJSON(w, http.StatusInternalServerError, response)
 	}
+}
+
+// Chunked admin uploads: browser sends many small POSTs so large files work
+// through proxies (nginx/Cloudflare) without a single huge request body.
+const adminUploadChunkDir = "seaweedfs-admin-uploads"
+
+type chunkedUploadInitRequest struct {
+	Path        string `json:"path"`
+	FileName    string `json:"fileName"`
+	ContentType string `json:"contentType"`
+	Size        int64  `json:"size"`
+}
+
+// InitChunkedUpload creates a temp session directory for a large file upload.
+func (h *FileBrowserHandlers) InitChunkedUpload(w http.ResponseWriter, r *http.Request) {
+	var req chunkedUploadInitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	fileName := util.CleanWindowsPath(strings.TrimSpace(req.FileName))
+	if fileName == "" || strings.Contains(fileName, "/") || strings.Contains(fileName, "\\") {
+		writeJSONError(w, http.StatusBadRequest, "invalid fileName")
+		return
+	}
+	currentPath := req.Path
+	if currentPath == "" {
+		currentPath = "/"
+	}
+	fullPath := path.Join(currentPath, fileName)
+	if !strings.HasPrefix(fullPath, "/") {
+		fullPath = "/" + fullPath
+	}
+	if _, err := h.validateAndCleanFilePath(fullPath); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	uploadID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), req.Size)
+	dir := filepath.Join(os.TempDir(), adminUploadChunkDir, uploadID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to create upload session")
+		return
+	}
+	meta := map[string]interface{}{
+		"path":        fullPath,
+		"fileName":    fileName,
+		"contentType": req.ContentType,
+		"size":        req.Size,
+	}
+	metaBytes, _ := json.Marshal(meta)
+	_ = os.WriteFile(filepath.Join(dir, "meta.json"), metaBytes, 0o600)
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"uploadId": uploadID,
+		"path":     fullPath,
+	})
+}
+
+// UploadChunk stores one chunk for an in-progress admin upload session.
+func (h *FileBrowserHandlers) UploadChunk(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(64 << 20); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "failed to parse chunk: "+err.Error())
+		return
+	}
+	uploadID := strings.TrimSpace(r.FormValue("uploadId"))
+	chunkIndex := strings.TrimSpace(r.FormValue("chunkIndex"))
+	if uploadID == "" || chunkIndex == "" || strings.Contains(uploadID, "/") || strings.Contains(uploadID, "..") {
+		writeJSONError(w, http.StatusBadRequest, "uploadId and chunkIndex are required")
+		return
+	}
+	dir := filepath.Join(os.TempDir(), adminUploadChunkDir, uploadID)
+	if _, err := os.Stat(dir); err != nil {
+		writeJSONError(w, http.StatusNotFound, "upload session not found")
+		return
+	}
+	file, header, err := r.FormFile("chunk")
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "chunk file is required")
+		return
+	}
+	defer file.Close()
+
+	idx, err := strconv.Atoi(chunkIndex)
+	if err != nil || idx < 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid chunkIndex")
+		return
+	}
+	outPath := filepath.Join(dir, fmt.Sprintf("chunk-%08d", idx))
+	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to store chunk")
+		return
+	}
+	defer out.Close()
+	written, err := io.Copy(out, file)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to write chunk")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"uploadId":   uploadID,
+		"chunkIndex": idx,
+		"size":       written,
+		"name":       header.Filename,
+	})
+}
+
+// CompleteChunkedUpload concatenates stored chunks and streams them into the filer.
+func (h *FileBrowserHandlers) CompleteChunkedUpload(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UploadID    string `json:"uploadId"`
+		TotalChunks int    `json:"totalChunks"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.UploadID == "" || strings.Contains(req.UploadID, "/") || strings.Contains(req.UploadID, "..") || req.TotalChunks <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "uploadId and totalChunks are required")
+		return
+	}
+	dir := filepath.Join(os.TempDir(), adminUploadChunkDir, req.UploadID)
+	metaBytes, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "upload session not found")
+		return
+	}
+	var meta struct {
+		Path        string `json:"path"`
+		FileName    string `json:"fileName"`
+		ContentType string `json:"contentType"`
+	}
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "invalid upload metadata")
+		return
+	}
+
+	assembled, err := os.CreateTemp(dir, "assembled-*")
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to assemble upload")
+		return
+	}
+	defer func() {
+		assembled.Close()
+		os.RemoveAll(dir)
+	}()
+
+	for i := 0; i < req.TotalChunks; i++ {
+		chunkPath := filepath.Join(dir, fmt.Sprintf("chunk-%08d", i))
+		in, err := os.Open(chunkPath)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("missing chunk %d", i))
+			return
+		}
+		_, copyErr := io.Copy(assembled, in)
+		in.Close()
+		if copyErr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to assemble chunks")
+			return
+		}
+	}
+	if _, err := assembled.Seek(0, io.SeekStart); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "failed to rewind assembled file")
+		return
+	}
+
+	contentType := meta.ContentType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	if err := h.uploadFileGrpc(r.Context(), meta.Path, meta.FileName, contentType, assembled); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	info, _ := assembled.Stat()
+	size := int64(0)
+	if info != nil {
+		size = info.Size()
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message": "uploaded",
+		"path":    meta.Path,
+		"name":    meta.FileName,
+		"size":    size,
+	})
+}
+
+// AbortChunkedUpload deletes a temp upload session.
+func (h *FileBrowserHandlers) AbortChunkedUpload(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UploadID string `json:"uploadId"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.UploadID == "" || strings.Contains(req.UploadID, "/") || strings.Contains(req.UploadID, "..") {
+		writeJSONError(w, http.StatusBadRequest, "uploadId is required")
+		return
+	}
+	dir := filepath.Join(os.TempDir(), adminUploadChunkDir, req.UploadID)
+	_ = os.RemoveAll(dir)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "aborted"})
 }
 
 // uploadFileToFiler uploads a file to the cluster via filer gRPC + volume

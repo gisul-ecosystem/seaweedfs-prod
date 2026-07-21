@@ -8,6 +8,7 @@ WORKDIR /src
 RUN git clone --depth 1 --branch "${SEAWEEDFS_REF}" https://github.com/seaweedfs/seaweedfs.git .
 COPY patches/admin.js weed/admin/static/js/admin.js
 COPY patches/file_browser_handlers.go weed/admin/handlers/file_browser_handlers.go
+COPY patches/admin_handlers.go weed/admin/handlers/admin_handlers.go
 RUN cd weed/admin && go generate .
 RUN cd weed && CGO_ENABLED=0 go build -o /go/bin/weed .
 

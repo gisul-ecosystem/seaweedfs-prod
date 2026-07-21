@@ -1164,7 +1164,8 @@ async function submitCreateFolder() {
     }
 }
 
-// Submit upload file form
+// Submit upload file form — chunked large-file upload through Admin API
+// (same origin: storage.gisul.co.in). No separate upload portal required.
 async function submitUploadFile() {
     const fileInput = document.getElementById('fileInput');
     const currentPath = document.getElementById('uploadPath').value;
@@ -1175,111 +1176,142 @@ async function submitUploadFile() {
     }
 
     const files = Array.from(fileInput.files);
-
-    const formData = new FormData();
-    files.forEach(file => {
-        formData.append('files', file);
-    });
-    formData.append('path', currentPath);
-
-    // Show progress bar and disable button
     const progressContainer = document.getElementById('uploadProgress');
     const progressBar = progressContainer.querySelector('.progress-bar');
     const uploadStatus = document.getElementById('uploadStatus');
     const submitButton = document.querySelector('#uploadFileModal .btn-primary');
     const originalText = submitButton.innerHTML;
 
+    // 32 MiB chunks stay under typical proxy/Cloudflare body limits
+    const CHUNK_SIZE = 32 * 1024 * 1024;
+
     progressContainer.style.display = 'block';
     progressBar.style.width = '0%';
     progressBar.setAttribute('aria-valuenow', '0');
     progressBar.textContent = '0%';
-    uploadStatus.textContent = `Uploading ${files.length} file(s)...`;
     submitButton.disabled = true;
     submitButton.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Uploading...';
 
+    const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+    let uploadedBytes = 0;
+    const failures = [];
+
+    function updateProgress(extra) {
+        const percent = totalBytes ? Math.round((uploadedBytes / totalBytes) * 100) : 0;
+        progressBar.style.width = percent + '%';
+        progressBar.setAttribute('aria-valuenow', percent);
+        progressBar.textContent = percent + '%';
+        uploadStatus.textContent = extra || `Uploading... ${percent}%`;
+    }
+
+    async function postJSON(url, body) {
+        const response = await fetch(basePath(url), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            credentials: 'same-origin',
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(payload.error || payload.message || `Request failed (${response.status})`);
+        }
+        return payload;
+    }
+
+    function uploadChunkXHR(uploadId, chunkIndex, blob) {
+        return new Promise((resolve, reject) => {
+            const formData = new FormData();
+            formData.append('uploadId', uploadId);
+            formData.append('chunkIndex', String(chunkIndex));
+            formData.append('chunk', blob, `chunk-${chunkIndex}`);
+
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', basePath('/api/files/upload-chunk'));
+            xhr.withCredentials = true;
+            xhr.upload.onprogress = function (e) {
+                if (!e.lengthComputable) return;
+                const current = uploadedBytes + e.loaded;
+                const percent = totalBytes ? Math.round((current / totalBytes) * 100) : 0;
+                progressBar.style.width = percent + '%';
+                progressBar.setAttribute('aria-valuenow', percent);
+                progressBar.textContent = percent + '%';
+            };
+            xhr.onload = function () {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve();
+                    return;
+                }
+                let msg = `chunk ${chunkIndex} failed (${xhr.status})`;
+                try {
+                    const err = JSON.parse(xhr.responseText);
+                    msg = err.error || err.message || msg;
+                } catch (e) {}
+                reject(new Error(msg));
+            };
+            xhr.onerror = function () {
+                reject(new Error(`Network error uploading chunk ${chunkIndex}`));
+            };
+            xhr.send(formData);
+        });
+    }
+
     try {
-        const xhr = new XMLHttpRequest();
+        for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
+            const file = files[fileIndex];
+            updateProgress(`Uploading ${file.name} (${fileIndex + 1}/${files.length})`);
 
-        // Handle progress
-        xhr.upload.addEventListener('progress', function (e) {
-            if (e.lengthComputable) {
-                const percentComplete = Math.round((e.loaded / e.total) * 100);
-                progressBar.style.width = percentComplete + '%';
-                progressBar.setAttribute('aria-valuenow', percentComplete);
-                progressBar.textContent = percentComplete + '%';
-                uploadStatus.textContent = `Uploading ${files.length} file(s)... ${percentComplete}%`;
-            }
-        });
+            let uploadId = null;
+            try {
+                const init = await postJSON('/api/files/upload-init', {
+                    path: currentPath,
+                    fileName: file.name,
+                    contentType: file.type || 'application/octet-stream',
+                    size: file.size,
+                });
+                uploadId = init.uploadId;
 
-        // Handle completion
-        xhr.addEventListener('load', function () {
-            if (xhr.status === 200) {
-                try {
-                    const response = JSON.parse(xhr.responseText);
-
-                    if (response.uploaded > 0) {
-                        if (response.failed === 0) {
-                            showSuccessMessage(`Successfully uploaded ${response.uploaded} file(s)`);
-                        } else {
-                            showSuccessMessage(response.message);
-                            // Show details of failed uploads
-                            if (response.errors && response.errors.length > 0) {
-                                console.warn('Upload errors:', response.errors);
-                            }
-                        }
-
-                        // Hide modal and refresh page
-                        const modal = bootstrap.Modal.getInstance(document.getElementById('uploadFileModal'));
-                        modal.hide();
-                        setTimeout(() => {
-                            window.location.reload();
-                        }, 1000);
-                    } else {
-                        let errorMessage = response.message || 'All file uploads failed';
-                        if (response.errors && response.errors.length > 0) {
-                            errorMessage += ': ' + response.errors.join(', ');
-                        }
-                        showErrorMessage(errorMessage);
-                    }
-                } catch (e) {
-                    showErrorMessage('Upload completed but response format was unexpected');
+                const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+                for (let i = 0; i < totalChunks; i++) {
+                    const start = i * CHUNK_SIZE;
+                    const end = Math.min(start + CHUNK_SIZE, file.size);
+                    const blob = file.slice(start, end);
+                    await uploadChunkXHR(uploadId, i, blob);
+                    uploadedBytes += blob.size;
+                    updateProgress(`Uploaded chunk ${i + 1}/${totalChunks} of ${file.name}`);
                 }
-                progressContainer.style.display = 'none';
-            } else {
-                let errorMessage = 'Unknown error';
-                try {
-                    const error = JSON.parse(xhr.responseText);
-                    errorMessage = error.error || error.message || errorMessage;
-                } catch (e) {
-                    errorMessage = `Server returned status ${xhr.status}`;
+
+                await postJSON('/api/files/upload-complete', {
+                    uploadId: uploadId,
+                    totalChunks: totalChunks,
+                });
+            } catch (err) {
+                failures.push(`${file.name}: ${err.message || err}`);
+                if (uploadId) {
+                    try {
+                        await postJSON('/api/files/upload-abort', { uploadId: uploadId });
+                    } catch (e) {}
                 }
-                showErrorMessage(`Failed to upload files: ${errorMessage}`);
-                progressContainer.style.display = 'none';
+                // keep absolute progress consistent if this file failed mid-way
+                uploadedBytes = files.slice(0, fileIndex + 1).reduce((sum, f) => sum + f.size, 0);
             }
-        });
+        }
 
-        // Handle errors
-        xhr.addEventListener('error', function () {
-            showErrorMessage('Failed to upload files. Please check your connection and try again.');
-            progressContainer.style.display = 'none';
-        });
-
-        // Handle abort
-        xhr.addEventListener('abort', function () {
-            showErrorMessage('File upload was cancelled.');
-            progressContainer.style.display = 'none';
-        });
-
-        // Send request
-        xhr.open('POST', basePath('/api/files/upload'));
-        xhr.send(formData);
-
+        if (failures.length === 0) {
+            showSuccessMessage(`Successfully uploaded ${files.length} file(s)`);
+            const modal = bootstrap.Modal.getInstance(document.getElementById('uploadFileModal'));
+            modal.hide();
+            setTimeout(() => window.location.reload(), 800);
+        } else if (failures.length < files.length) {
+            showSuccessMessage(`Uploaded with errors: ${failures.join('; ')}`);
+            setTimeout(() => window.location.reload(), 1200);
+        } else {
+            showErrorMessage(`Upload failed: ${failures.join('; ')}`);
+        }
     } catch (error) {
         console.error('Upload error:', error);
         showErrorMessage('Failed to upload files. Please try again.');
-        progressContainer.style.display = 'none';
     } finally {
-        // Re-enable the button
+        progressContainer.style.display = 'none';
         submitButton.disabled = false;
         submitButton.innerHTML = originalText;
     }
