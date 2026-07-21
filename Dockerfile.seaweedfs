@@ -1,5 +1,4 @@
 # Build patched SeaweedFS from official upstream + Gisul admin patches.
-# This repo stays deploy-only (no full upstream source / CI).
 ARG SEAWEEDFS_REF=4.39
 
 FROM golang:1.25-alpine AS builder
@@ -13,10 +12,14 @@ RUN cd weed/admin && go generate .
 RUN cd weed && CGO_ENABLED=0 go build -o /go/bin/weed .
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates curl su-exec fuse
+RUN apk add --no-cache ca-certificates curl su-exec fuse && \
+    addgroup -g 1000 seaweed && \
+    adduser -D -u 1000 -G seaweed seaweed
 COPY --from=builder /go/bin/weed /usr/bin/weed
 COPY --from=builder /src/docker/entrypoint.sh /entrypoint.sh
-RUN chmod 755 /entrypoint.sh /usr/bin/weed
+RUN chmod 755 /entrypoint.sh /usr/bin/weed && \
+    mkdir -p /data /etc/seaweedfs && \
+    chown -R seaweed:seaweed /data /etc/seaweedfs
 WORKDIR /data
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["mini", "-dir=/data"]
