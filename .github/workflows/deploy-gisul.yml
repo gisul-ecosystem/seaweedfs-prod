@@ -49,7 +49,6 @@ jobs:
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           source: "bundle/*"
-          # ubuntu cannot write under /opt; stage in home then sudo-install
           target: "/home/ubuntu/seaweedfs-deploy"
           strip_components: 1
           timeout: 120s
@@ -68,9 +67,11 @@ jobs:
             STAGE=/home/ubuntu/seaweedfs-deploy
             sudo mkdir -p /opt/seaweedfs
             sudo chown -R ubuntu:ubuntu /opt/seaweedfs
-            # Preserve live secrets if present
+
+            # Preserve existing secrets, then ensure required keys are present
             if [ -f /opt/seaweedfs/.env ]; then cp /opt/seaweedfs/.env /tmp/seaweedfs.env.bak; fi
             if [ -f /opt/seaweedfs/s3.json ]; then cp /opt/seaweedfs/s3.json /tmp/seaweedfs.s3.bak; fi
+
             rsync -a --delete \
               --exclude '.env' \
               --exclude 's3.json' \
@@ -78,32 +79,53 @@ jobs:
               --exclude 'seaweedfs-image.tar' \
               --exclude 'upload-service-image.tar' \
               "${STAGE}/" /opt/seaweedfs/
+
             if [ -f /tmp/seaweedfs.env.bak ]; then mv /tmp/seaweedfs.env.bak /opt/seaweedfs/.env; fi
             if [ -f /tmp/seaweedfs.s3.bak ]; then mv /tmp/seaweedfs.s3.bak /opt/seaweedfs/s3.json; fi
+
+            # Always refresh compose env values from GitHub secrets
+            cat > /opt/seaweedfs/.env <<EOF
+            S3_ACCESS_KEY=${{ secrets.S3_ACCESS_KEY }}
+            S3_SECRET_KEY=${{ secrets.S3_SECRET_KEY }}
+            S3_DEFAULT_BUCKET=${{ secrets.S3_DEFAULT_BUCKET }}
+            S3_ENDPOINT=https://s3api.gisul.co.in
+            S3_REGION=us-east-1
+            ADMIN_USER=admin
+            ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
+            EOF
+
             docker load -i "${STAGE}/seaweedfs-image.tar"
             docker load -i "${STAGE}/upload-service-image.tar"
             cd /opt/seaweedfs
             export SEAWEEDFS_IMAGE=gisul-seaweedfs:${{ github.sha }}
             export UPLOAD_SERVICE_IMAGE=gisul-upload-service:${{ github.sha }}
             export COMPOSE_PROJECT_NAME=seaweedfs
-            if [ ! -f .env ]; then
-              cat > .env <<EOF
-            S3_ACCESS_KEY=${{ secrets.S3_ACCESS_KEY }}
-            S3_SECRET_KEY=${{ secrets.S3_SECRET_KEY }}
-            S3_DEFAULT_BUCKET=${{ secrets.S3_DEFAULT_BUCKET }}
-            S3_ENDPOINT=https://s3api.gisul.co.in
-            S3_REGION=us-east-1
-            ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
-            EOF
-            fi
+            set -a
+            # shellcheck disable=SC1091
+            . ./.env
+            set +a
+
             docker tag gisul-upload-service:${{ github.sha }} gisul-upload-service:latest
             docker compose up -d --no-build
+
+            # Apply nginx configs that already have certificates
             sudo cp nginx/storage.gisul.co.in.conf /etc/nginx/sites-available/storage.gisul.co.in
             sudo cp nginx/s3api.gisul.co.in.conf /etc/nginx/sites-available/s3api.gisul.co.in
-            sudo cp nginx/upload.gisul.co.in.conf /etc/nginx/sites-available/upload.gisul.co.in
             sudo ln -sf /etc/nginx/sites-available/storage.gisul.co.in /etc/nginx/sites-enabled/storage.gisul.co.in
             sudo ln -sf /etc/nginx/sites-available/s3api.gisul.co.in /etc/nginx/sites-enabled/s3api.gisul.co.in
-            sudo ln -sf /etc/nginx/sites-available/upload.gisul.co.in /etc/nginx/sites-enabled/upload.gisul.co.in
+
+            # Only enable upload.gisul.co.in after SSL cert exists
+            if [ -f /etc/letsencrypt/live/upload.gisul.co.in/fullchain.pem ]; then
+              sudo cp nginx/upload.gisul.co.in.conf /etc/nginx/sites-available/upload.gisul.co.in
+              sudo ln -sf /etc/nginx/sites-available/upload.gisul.co.in /etc/nginx/sites-enabled/upload.gisul.co.in
+            else
+              echo "Skipping upload.gisul.co.in nginx site (SSL cert not issued yet)"
+              sudo rm -f /etc/nginx/sites-enabled/upload.gisul.co.in
+              # Temporary HTTP proxy on upload host IP path via localhost port until DNS+cert ready
+              # Upload portal is still reachable at http://127.0.0.1:8088 on the VM
+            fi
+
             sudo nginx -t
             sudo systemctl reload nginx
+            docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
             bash scripts/smoke-test.sh || true
