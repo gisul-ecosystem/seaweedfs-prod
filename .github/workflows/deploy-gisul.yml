@@ -21,12 +21,26 @@ jobs:
       - name: Build SeaweedFS image with admin patch
         run: |
           docker build -f Dockerfile.seaweedfs -t gisul-seaweedfs:${{ github.sha }} .
-          docker save gisul-seaweedfs:${{ github.sha }} -o seaweedfs-image.tar
+          docker save gisul-seaweedfs:${{ github.sha }} > seaweedfs-image.tar
+          chmod 644 seaweedfs-image.tar
 
       - name: Build upload-service image
         run: |
           docker build -f Dockerfile.upload-service -t gisul-upload-service:${{ github.sha }} .
-          docker save gisul-upload-service:${{ github.sha }} -o upload-service-image.tar
+          docker save gisul-upload-service:${{ github.sha }} > upload-service-image.tar
+          chmod 644 upload-service-image.tar
+
+      - name: Prepare deploy bundle
+        run: |
+          mkdir -p bundle
+          rsync -a \
+            --exclude '.git' \
+            --exclude 'bundle' \
+            --exclude 'seaweedfs-image.tar' \
+            --exclude 'upload-service-image.tar' \
+            ./ bundle/
+          cp seaweedfs-image.tar upload-service-image.tar bundle/
+          ls -lah bundle | head
 
       - name: Copy deployment bundle to VM
         uses: appleboy/scp-action@v0.1.7
@@ -34,9 +48,9 @@ jobs:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
-          source: "*,seaweedfs-image.tar,upload-service-image.tar"
+          source: "bundle/*"
           target: "/opt/seaweedfs-deploy"
-          strip_components: 0
+          strip_components: 1
 
       - name: Deploy on VM
         uses: appleboy/ssh-action@v1.2.0
@@ -54,6 +68,8 @@ jobs:
               --exclude '.env' \
               --exclude 's3.json' \
               --exclude '.git' \
+              --exclude 'seaweedfs-image.tar' \
+              --exclude 'upload-service-image.tar' \
               /opt/seaweedfs-deploy/ /opt/seaweedfs/
             if [ -f /tmp/seaweedfs.env.bak ]; then sudo mv /tmp/seaweedfs.env.bak /opt/seaweedfs/.env; fi
             if [ -f /tmp/seaweedfs.s3.bak ]; then sudo mv /tmp/seaweedfs.s3.bak /opt/seaweedfs/s3.json; fi
