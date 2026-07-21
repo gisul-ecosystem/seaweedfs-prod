@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,7 +17,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	smithyendpoints "github.com/aws/smithy-go/endpoints"
 )
 
 type cfg struct {
@@ -64,18 +62,6 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-type endpointResolver struct {
-	url string
-}
-
-func (r endpointResolver) ResolveEndpoint(_ context.Context, _ s3.EndpointParameters) (smithyendpoints.Endpoint, error) {
-	u, err := url.Parse(r.url)
-	if err != nil {
-		return smithyendpoints.Endpoint{}, err
-	}
-	return smithyendpoints.Endpoint{URI: *u}, nil
-}
-
 func newServer(c cfg) (*server, error) {
 	if c.S3AccessKey == "" || c.S3SecretKey == "" {
 		return nil, fmt.Errorf("S3_ACCESS_KEY and S3_SECRET_KEY are required")
@@ -88,9 +74,10 @@ func newServer(c cfg) (*server, error) {
 		return nil, err
 	}
 	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+		// Path-style URLs: https://s3api.../bucket/key
+		// Do NOT override EndpointResolverV2 — that drops the bucket from the path.
 		o.BaseEndpoint = aws.String(c.S3Endpoint)
 		o.UsePathStyle = true
-		o.EndpointResolverV2 = endpointResolver{url: c.S3Endpoint}
 	})
 	return &server{
 		s3Client:      client,

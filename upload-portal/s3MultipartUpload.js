@@ -33,11 +33,8 @@ async function uploadPartWithRetry(url, blob, headers, onProgress) {
       return await new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('PUT', url);
-        Object.entries(headers || {}).forEach(([name, value]) => {
-          if (name.toLowerCase() !== 'host') {
-            xhr.setRequestHeader(name, value);
-          }
-        });
+        // Presigned auth is in the query string. Do not set extra signed headers from
+        // the browser — that breaks CORS/preflight and can invalidate the signature.
         xhr.upload.onprogress = (event) => {
           if (event.lengthComputable && onProgress) {
             onProgress(event.loaded, event.total);
@@ -46,12 +43,17 @@ async function uploadPartWithRetry(url, blob, headers, onProgress) {
         xhr.onload = () => {
           if (xhr.status >= 200 && xhr.status < 300) {
             const etag = xhr.getResponseHeader('ETag') || xhr.getResponseHeader('etag');
+            if (!etag) {
+              reject(new Error('Part upload succeeded but ETag header was missing'));
+              return;
+            }
             resolve(etag);
             return;
           }
-          reject(new Error(`Part upload failed with status ${xhr.status}`));
+          const body = (xhr.responseText || '').slice(0, 300);
+          reject(new Error(`Part upload failed with status ${xhr.status}${body ? `: ${body}` : ''}`));
         };
-        xhr.onerror = () => reject(new Error('Network error during part upload'));
+        xhr.onerror = () => reject(new Error('Network error during part upload (CORS/network). Check S3 URL includes /bucket/...'));
         xhr.onabort = () => reject(new Error('Part upload aborted'));
         xhr.send(blob);
       });
