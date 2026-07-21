@@ -1,0 +1,4 @@
+.env
+*.exe
+seaweedfs-image.tar
+upload-service-image.tar

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gisul Large File Upload</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="container">
+    <header>
+      <h1>Large File Upload</h1>
+      <p>Reliable multipart uploads to SeaweedFS S3 with signed download links.</p>
+    </header>
+
+    <section class="card">
+      <label for="bucket">Bucket</label>
+      <input id="bucket" type="text" value="videos" />
+
+      <label for="prefix">Folder prefix</label>
+      <input id="prefix" type="text" placeholder="transfer/my-folder" />
+
+      <label for="fileInput">Files</label>
+      <input id="fileInput" type="file" multiple />
+
+      <div id="dropZone" class="drop-zone">Drag and drop files here</div>
+
+      <button id="uploadBtn" type="button">Start Upload</button>
+    </section>
+
+    <section class="card">
+      <h2>Queue</h2>
+      <div id="queue"></div>
+    </section>
+
+    <section class="card">
+      <h2>Completed</h2>
+      <div id="completed"></div>
+    </section>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

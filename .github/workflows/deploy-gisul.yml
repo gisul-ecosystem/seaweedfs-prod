@@ -1,0 +1,86 @@
+name: Deploy SeaweedFS Prod
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build SeaweedFS image with admin patch
+        run: |
+          docker build -f Dockerfile.seaweedfs -t gisul-seaweedfs:${{ github.sha }} .
+          docker save gisul-seaweedfs:${{ github.sha }} -o seaweedfs-image.tar
+
+      - name: Build upload-service image
+        run: |
+          docker build -f Dockerfile.upload-service -t gisul-upload-service:${{ github.sha }} .
+          docker save gisul-upload-service:${{ github.sha }} -o upload-service-image.tar
+
+      - name: Copy deployment bundle to VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          source: "*,seaweedfs-image.tar,upload-service-image.tar"
+          target: "/opt/seaweedfs-deploy"
+          strip_components: 0
+
+      - name: Deploy on VM
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            sudo mkdir -p /opt/seaweedfs
+            # Preserve live secrets if present
+            if [ -f /opt/seaweedfs/.env ]; then cp /opt/seaweedfs/.env /tmp/seaweedfs.env.bak; fi
+            if [ -f /opt/seaweedfs/s3.json ]; then cp /opt/seaweedfs/s3.json /tmp/seaweedfs.s3.bak; fi
+            sudo rsync -a --delete \
+              --exclude '.env' \
+              --exclude 's3.json' \
+              --exclude '.git' \
+              /opt/seaweedfs-deploy/ /opt/seaweedfs/
+            if [ -f /tmp/seaweedfs.env.bak ]; then sudo mv /tmp/seaweedfs.env.bak /opt/seaweedfs/.env; fi
+            if [ -f /tmp/seaweedfs.s3.bak ]; then sudo mv /tmp/seaweedfs.s3.bak /opt/seaweedfs/s3.json; fi
+            docker load -i /opt/seaweedfs-deploy/seaweedfs-image.tar
+            docker load -i /opt/seaweedfs-deploy/upload-service-image.tar
+            cd /opt/seaweedfs
+            export SEAWEEDFS_IMAGE=gisul-seaweedfs:${{ github.sha }}
+            export UPLOAD_SERVICE_IMAGE=gisul-upload-service:${{ github.sha }}
+            export COMPOSE_PROJECT_NAME=seaweedfs
+            if [ ! -f .env ]; then
+              cat > .env <<EOF
+            S3_ACCESS_KEY=${{ secrets.S3_ACCESS_KEY }}
+            S3_SECRET_KEY=${{ secrets.S3_SECRET_KEY }}
+            S3_DEFAULT_BUCKET=${{ secrets.S3_DEFAULT_BUCKET }}
+            S3_ENDPOINT=https://s3api.gisul.co.in
+            S3_REGION=us-east-1
+            ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
+            EOF
+            fi
+            docker tag gisul-upload-service:${{ github.sha }} gisul-upload-service:latest
+            docker compose up -d --no-build
+            sudo cp nginx/storage.gisul.co.in.conf /etc/nginx/sites-available/storage.gisul.co.in
+            sudo cp nginx/s3api.gisul.co.in.conf /etc/nginx/sites-available/s3api.gisul.co.in
+            sudo cp nginx/upload.gisul.co.in.conf /etc/nginx/sites-available/upload.gisul.co.in
+            sudo ln -sf /etc/nginx/sites-available/storage.gisul.co.in /etc/nginx/sites-enabled/storage.gisul.co.in
+            sudo ln -sf /etc/nginx/sites-available/s3api.gisul.co.in /etc/nginx/sites-enabled/s3api.gisul.co.in
+            sudo ln -sf /etc/nginx/sites-available/upload.gisul.co.in /etc/nginx/sites-enabled/upload.gisul.co.in
+            sudo nginx -t
+            sudo systemctl reload nginx
+            bash scripts/smoke-test.sh || true

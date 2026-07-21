@@ -1,0 +1,14 @@
+FROM golang:1.22-alpine AS build
+WORKDIR /src/upload-service
+COPY upload-service/go.mod upload-service/go.sum ./
+RUN go mod download
+COPY upload-service/ ./
+RUN CGO_ENABLED=0 GOOS=linux go build -o /upload-service .
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+WORKDIR /app
+COPY --from=build /upload-service /app/upload-service
+COPY upload-portal /app/static
+EXPOSE 8088
+CMD ["/app/upload-service"]

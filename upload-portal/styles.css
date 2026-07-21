@@ -1,0 +1,108 @@
+:root {
+  color-scheme: light dark;
+  font-family: Inter,Segoe UI,sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.card {
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+label {
+  display: block;
+  margin-top: 12px;
+  margin-bottom: 6px;
+}
+
+input[type="text"], input[type="file"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  background: #0b1220;
+  color: inherit;
+}
+
+button {
+  margin-top: 16px;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 8px;
+  background: #2563eb;
+  color: white;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.drop-zone {
+  margin-top: 12px;
+  padding: 24px;
+  border: 2px dashed #334155;
+  border-radius: 12px;
+  text-align: center;
+}
+
+.drop-zone.drag-over {
+  border-color: #2563eb;
+  background: #172554;
+}
+
+.file-row {
+  border-top: 1px solid #1f2937;
+  padding: 12px 0;
+}
+
+.progress {
+  height: 8px;
+  background: #1f2937;
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.progress > span {
+  display: block;
+  height: 100%;
+  background: #22c55e;
+  width: 0;
+}
+
+.meta {
+  font-size: 0.875rem;
+  color: #94a3b8;
+}
+
+.link-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.link-row input {
+  flex: 1;
+}
+
+.error {
+  color: #f87171;
+}

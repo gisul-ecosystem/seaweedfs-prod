@@ -1,0 +1,113 @@
+services:
+  master:
+    image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:4.39}
+    container_name: seaweed-master
+    command: >
+      master
+      -mdir=/data
+      -ip=master
+      -ip.bind=0.0.0.0
+      -port=9333
+      -defaultReplication=000
+      -volumeSizeLimitMB=30000
+    volumes:
+      - master-data:/data
+    restart: unless-stopped
+
+  volume:
+    image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:4.39}
+    container_name: seaweed-volume
+    command: >
+      volume
+      -dir=/data
+      -max=100
+      -mserver=master:9333
+      -ip=volume
+      -ip.bind=0.0.0.0
+      -port=8080
+      -fileSizeLimitMB=10240
+    volumes:
+      - volume-data:/data
+    depends_on:
+      - master
+    restart: unless-stopped
+
+  filer:
+    image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:4.39}
+    container_name: seaweed-filer
+    command: >
+      filer
+      -master=master:9333
+      -ip=filer
+      -ip.bind=0.0.0.0
+      -port=8888
+    volumes:
+      - filer-data:/data
+      - ./s3.json:/etc/seaweedfs/s3.json:ro
+    depends_on:
+      - master
+      - volume
+    restart: unless-stopped
+
+  s3:
+    image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:4.39}
+    container_name: seaweed-s3
+    command: >
+      s3
+      -filer=filer:8888
+      -ip.bind=0.0.0.0
+      -port=8333
+      -config=/etc/seaweedfs/s3.json
+    ports:
+      - "8333:8333"
+    volumes:
+      - ./s3.json:/etc/seaweedfs/s3.json:ro
+    depends_on:
+      - filer
+    restart: unless-stopped
+
+  admin:
+    image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:4.39}
+    container_name: seaweed-admin
+    command: >
+      admin
+      -port=23646
+      -master=master:9333
+      -dataDir=/data
+      -adminUser=admin
+      -adminPassword=${ADMIN_PASSWORD:-admin}
+    ports:
+      - "23646:23646"
+    volumes:
+      - admin-data:/data
+    depends_on:
+      - master
+      - filer
+    restart: unless-stopped
+
+  upload-service:
+    image: ${UPLOAD_SERVICE_IMAGE:-gisul-upload-service:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.upload-service
+    container_name: gisul-upload-service
+    environment:
+      PORT: "8088"
+      S3_ENDPOINT: ${S3_ENDPOINT:-https://s3api.gisul.co.in}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_DEFAULT_BUCKET: ${S3_DEFAULT_BUCKET:-videos}
+      STATIC_DIR: /app/static
+      PRESIGN_EXPIRY_SECONDS: "900"
+    ports:
+      - "8088:8088"
+    depends_on:
+      - s3
+    restart: unless-stopped
+
+volumes:
+  master-data:
+  volume-data:
+  filer-data:
+  admin-data:
