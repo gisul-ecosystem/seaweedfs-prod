@@ -49,8 +49,12 @@ jobs:
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           source: "bundle/*"
-          target: "/opt/seaweedfs-deploy"
+          # ubuntu cannot write under /opt; stage in home then sudo-install
+          target: "/home/ubuntu/seaweedfs-deploy"
           strip_components: 1
+          timeout: 120s
+          command_timeout: 30m
+          overwrite: true
 
       - name: Deploy on VM
         uses: appleboy/ssh-action@v1.2.0
@@ -58,23 +62,26 @@ jobs:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
+          command_timeout: 30m
           script: |
             set -euo pipefail
+            STAGE=/home/ubuntu/seaweedfs-deploy
             sudo mkdir -p /opt/seaweedfs
+            sudo chown -R ubuntu:ubuntu /opt/seaweedfs
             # Preserve live secrets if present
             if [ -f /opt/seaweedfs/.env ]; then cp /opt/seaweedfs/.env /tmp/seaweedfs.env.bak; fi
             if [ -f /opt/seaweedfs/s3.json ]; then cp /opt/seaweedfs/s3.json /tmp/seaweedfs.s3.bak; fi
-            sudo rsync -a --delete \
+            rsync -a --delete \
               --exclude '.env' \
               --exclude 's3.json' \
               --exclude '.git' \
               --exclude 'seaweedfs-image.tar' \
               --exclude 'upload-service-image.tar' \
-              /opt/seaweedfs-deploy/ /opt/seaweedfs/
-            if [ -f /tmp/seaweedfs.env.bak ]; then sudo mv /tmp/seaweedfs.env.bak /opt/seaweedfs/.env; fi
-            if [ -f /tmp/seaweedfs.s3.bak ]; then sudo mv /tmp/seaweedfs.s3.bak /opt/seaweedfs/s3.json; fi
-            docker load -i /opt/seaweedfs-deploy/seaweedfs-image.tar
-            docker load -i /opt/seaweedfs-deploy/upload-service-image.tar
+              "${STAGE}/" /opt/seaweedfs/
+            if [ -f /tmp/seaweedfs.env.bak ]; then mv /tmp/seaweedfs.env.bak /opt/seaweedfs/.env; fi
+            if [ -f /tmp/seaweedfs.s3.bak ]; then mv /tmp/seaweedfs.s3.bak /opt/seaweedfs/s3.json; fi
+            docker load -i "${STAGE}/seaweedfs-image.tar"
+            docker load -i "${STAGE}/upload-service-image.tar"
             cd /opt/seaweedfs
             export SEAWEEDFS_IMAGE=gisul-seaweedfs:${{ github.sha }}
             export UPLOAD_SERVICE_IMAGE=gisul-upload-service:${{ github.sha }}
