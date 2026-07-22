@@ -8,18 +8,8 @@ WORKDIR /src
 RUN git clone --depth 1 --branch "${SEAWEEDFS_REF}" https://github.com/seaweedfs/seaweedfs.git .
 COPY patches/admin.js weed/admin/static/js/admin.js
 COPY patches/file_browser_handlers.go weed/admin/handlers/file_browser_handlers.go
-# Inject only chunked-upload routes into upstream admin_handlers.go (do not replace the whole file).
-RUN awk '{
-  print
-  if ($0 ~ /filesApi\.Handle\("\/upload", wrapWrite\(h\.fileBrowserHandlers\.UploadFile\)\)\.Methods\(http\.MethodPost\)/) {
-    print "\tfilesApi.Handle(\"/upload-init\", wrapWrite(h.fileBrowserHandlers.InitChunkedUpload)).Methods(http.MethodPost)"
-    print "\tfilesApi.Handle(\"/upload-chunk\", wrapWrite(h.fileBrowserHandlers.UploadChunk)).Methods(http.MethodPost)"
-    print "\tfilesApi.Handle(\"/upload-complete\", wrapWrite(h.fileBrowserHandlers.CompleteChunkedUpload)).Methods(http.MethodPost)"
-    print "\tfilesApi.Handle(\"/upload-abort\", wrapWrite(h.fileBrowserHandlers.AbortChunkedUpload)).Methods(http.MethodPost)"
-  }
-}' weed/admin/handlers/admin_handlers.go > /tmp/admin_handlers.go \
- && mv /tmp/admin_handlers.go weed/admin/handlers/admin_handlers.go \
- && grep -n 'upload-init\|upload-chunk\|upload-complete\|upload-abort' weed/admin/handlers/admin_handlers.go
+COPY patches/inject-upload-routes.sh /tmp/inject-upload-routes.sh
+RUN chmod +x /tmp/inject-upload-routes.sh && /tmp/inject-upload-routes.sh
 RUN cd weed/admin && go generate .
 RUN cd weed && CGO_ENABLED=0 go build -o /go/bin/weed .
 
