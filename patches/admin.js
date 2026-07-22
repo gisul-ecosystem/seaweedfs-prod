@@ -1182,8 +1182,9 @@ async function submitUploadFile() {
     const submitButton = document.querySelector('#uploadFileModal .btn-primary');
     const originalText = submitButton.innerHTML;
 
-    // 32 MiB chunks stay under typical proxy/Cloudflare body limits
-    const CHUNK_SIZE = 32 * 1024 * 1024;
+    // 80 MiB chunks stay under Cloudflare ~100MB proxied body limit
+    // (multipart form overhead needs headroom below 100MB).
+    const CHUNK_SIZE = 80 * 1024 * 1024;
 
     progressContainer.style.display = 'block';
     progressBar.style.width = '0%';
