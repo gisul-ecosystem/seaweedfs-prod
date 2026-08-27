@@ -9,7 +9,6 @@ services:
       -ip.bind=0.0.0.0
       -port=9333
       -defaultReplication=000
-      -volumeSizeLimitMB=30000
     volumes:
       - master-data:/data
     restart: unless-stopped
@@ -25,7 +24,6 @@ services:
       -ip=volume
       -ip.bind=0.0.0.0
       -port=8080
-      -fileSizeLimitMB=10240
     volumes:
       - volume-data:/data
     depends_on:
@@ -99,7 +97,7 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY}
       S3_DEFAULT_BUCKET: ${S3_DEFAULT_BUCKET:-videos}
       STATIC_DIR: /app/static
-      PRESIGN_EXPIRY_SECONDS: "900"
+      PRESIGN_EXPIRY_SECONDS: "86400"
     ports:
       - "8088:8088"
     depends_on:

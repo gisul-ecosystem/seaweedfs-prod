@@ -1,4 +1,4 @@
-const DEFAULT_PART_SIZE = 8 * 1024 * 1024; // 8 MiB
+const DEFAULT_PART_SIZE = 128 * 1024 * 1024; // 128 MiB — supports files up to ~1.28 TB within S3's 10,000-part limit
 const MAX_RETRIES = 3;
 
 async function apiPost(path, body) {
@@ -133,7 +133,7 @@ export async function uploadFileMultipart({
     const signed = await apiPost('/api/uploads/download-url', {
       bucket: init.bucket,
       key: init.key,
-      expiresIn: 3600,
+      expiresIn: 86400,
     });
 
     return {
